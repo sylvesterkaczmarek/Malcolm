@@ -1,0 +1,69 @@
+name: Prepare Zeek rotated log type fix
+
+on:
+  push:
+    branches:
+      - fix/490-zeek-rotated-log-type
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update rotation suffix matcher
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('logstash/pipelines/zeek/1000_zeek_prep.conf')
+          text = path.read_text()
+          old = r"(?:\.\d{4}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2})?\.log/i"
+          new = r"(?:\.(?:\d{4}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}|\d{2}:\d{2}:\d{2}[-_]\d{2}:\d{2}:\d{2}))?\.log/i"
+          if new in text:
+              print('Source fix already applied.')
+              raise SystemExit(0)
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one rotation matcher, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Validate filename extraction cases
+        run: |
+          ruby <<'RUBY'
+          pattern = /^(.*?)(?:\((.*)\))?(?:\.(?:\d{4}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}[_:-]?\d{2}|\d{2}:\d{2}:\d{2}[-_]\d{2}:\d{2}:\d{2}))?\.log/i
+          cases = {
+            'conn.log' => ['conn', nil],
+            'opcua-binary.log' => ['opcua-binary', nil],
+            'conn(tagA,tagB).log' => ['conn', 'tagA,tagB'],
+            'conn.2020-01-16-14-00-00.log' => ['conn', nil],
+            'conn.2020_01_16_14_00_00.log' => ['conn', nil],
+            'analyzer.03:00:00_03:49:27.log' => ['analyzer', nil],
+            'conn.03:00:00-04:00:00.log' => ['conn', nil],
+            'conn(tagA).03:00:00_03:49:27.log' => ['conn', 'tagA'],
+          }
+          cases.each do |filename, expected|
+            match = filename.match(pattern)
+            raise "no match for #{filename}" unless match
+            actual = match.captures
+            raise "#{filename}: expected #{expected.inspect}, got #{actual.inspect}" unless actual == expected
+          end
+          puts "validated #{cases.length} filename forms"
+          RUBY
+
+      - name: Commit source fix
+        run: |
+          if git diff --quiet -- logstash/pipelines/zeek/1000_zeek_prep.conf; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git config user.name 'Sylvester Kaczmarek'
+          git config user.email '16242628+sylvesterkaczmarek@users.noreply.github.com'
+          git add logstash/pipelines/zeek/1000_zeek_prep.conf
+          git commit -s -m 'fix(zeek): detect rotated archive log types (#490)'
+          git push
