@@ -59,20 +59,41 @@ def _strip_compression_ext(path):
     )
 
 
+def _copy_limited_stream(src, dst):
+    total_bytes = 0
+    while chunk := src.read(65536):
+        total_bytes += len(chunk)
+        if total_bytes > ARCHIVE_EXTRACT_MAX_TOTAL_BYTES:
+            raise ArchiveBombError(
+                f"archive exceeds size limit ({ARCHIVE_EXTRACT_MAX_TOTAL_BYTES} bytes): "
+                f"stopped after {total_bytes} decompressed bytes"
+            )
+        dst.write(chunk)
+
+
 def _extract_raw_stream(archive, dest, archive_mime=None):
     open_fn = ARCHIVE_RAW_STREAM_MIMES[archive_mime if archive_mime else magic.from_file(archive, mime=True)]
     outname = _strip_compression_ext(archive)
     outpath = os.path.join(dest, outname)
     with open_fn(archive, 'rb') as src, open(outpath, 'wb') as dst:
-        while chunk := src.read(65536):
-            dst.write(chunk)
+        _copy_limited_stream(src, dst)
 
 
 def _extract_lzip(archive, dest):
     outname = _strip_compression_ext(archive)
     outpath = os.path.join(dest, outname)
-    with open(outpath, 'wb') as dst:
-        subprocess.run(['lzip', '-d', '-c', archive], stdout=dst, check=True)
+    process = subprocess.Popen(['lzip', '-d', '-c', archive], stdout=subprocess.PIPE)
+    try:
+        with open(outpath, 'wb') as dst:
+            _copy_limited_stream(process.stdout, dst)
+        returncode = process.wait()
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, process.args)
+    except Exception:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
 
 
 def _extract_libarchive(archive, dest):
@@ -131,14 +152,18 @@ def safe_extract(archive, dest):
     os.makedirs(dest, exist_ok=False)
     file_mime_type = magic.from_file(archive, mime=True)
 
-    if TAR_COMPRESSED_EXTS.search(archive):
-        _extract_libarchive(archive, dest)
-    elif file_mime_type in ARCHIVE_RAW_STREAM_MIMES:
-        _extract_raw_stream(archive, dest, file_mime_type)
-    elif file_mime_type == 'application/x-lzip':
-        _extract_lzip(archive, dest)
-    else:
-        _extract_libarchive(archive, dest)
+    try:
+        if TAR_COMPRESSED_EXTS.search(archive):
+            _extract_libarchive(archive, dest)
+        elif file_mime_type in ARCHIVE_RAW_STREAM_MIMES:
+            _extract_raw_stream(archive, dest, file_mime_type)
+        elif file_mime_type == 'application/x-lzip':
+            _extract_lzip(archive, dest)
+        else:
+            _extract_libarchive(archive, dest)
+    except ArchiveBombError:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
 
 
 if len(sys.argv) != 3:
