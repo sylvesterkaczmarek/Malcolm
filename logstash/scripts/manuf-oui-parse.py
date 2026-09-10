@@ -76,6 +76,7 @@ def main():
     if args.input.lower().startswith('http') and not os.path.isfile(args.input):
         tmpf = tempfile.NamedTemporaryFile(delete=True, suffix=".txt")
         r = requests.get(args.input)
+        r.raise_for_status()
         with open(tmpf.name, 'wb') as f:
             f.write(r.content)
         args.input = tmpf.name
